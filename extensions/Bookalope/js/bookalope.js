@@ -433,6 +433,8 @@ function askSaveBookflowFile(bookflow, format, style) {
     var bookAutoClean;
     var bookHighlightIssues;
     var bookSkipStructure;
+    var bookUploadFileType;
+    var bookUploadOptions;
 
 
     /**
@@ -611,11 +613,12 @@ function askSaveBookflowFile(bookflow, format, style) {
         } else {
 
             // Passing `undefined` as document type to setDocument() causes the server to
-            // determine the type of the uploaded file. Also note that result.data is a
+            // determine the type of the uploaded file; for the exported active document
+            // we pass "epub" explicitly. Also note that result.data is a
             // base-64 encoded binary, so we have to decode it before passing it to the
             // Bookalope wrapper. The wrapper will then encode it (again) before shipping
             // it off to the server.
-            bookflow.setDocument(bookFileName, atob(result.data), undefined, bookSkipStructure, bookUploadOptions)
+            bookflow.setDocument(bookFileName, atob(result.data), bookUploadFileType, bookSkipStructure, bookUploadOptions)
             .then(function (bookflow) {
 
                 // Periodically poll the Bookalope server to update the Bookflow. Then check
@@ -721,24 +724,24 @@ function askSaveBookflowFile(bookflow, format, style) {
 
     /**
      * The user wants to upload the currently active document. Because Bookalope doesn't
-     * support InDesign file formats (will it ever?) we first save the active document as
-     * a local RTF file and then upload that RTF file to Bookalope.
+     * support InDesign file formats (will it ever?) we first export the active document as
+     * a local EPUB file and then upload that EPUB file to Bookalope.
      */
 
     function createBookFromActiveDocument() {
         showSpinner();
         showStatus("Preparing active document");
 
-        // Noodle through the active document to create an RTF file, and save that.
+        // Export the active document to an EPUB file, and save that.
         // If everything went well, create the Book and upload the file.
-        csInterface.evalScript("bookalopeActiveDocumentToRTF();", function (result) {
+        csInterface.evalScript("bookalopeActiveDocumentToEPUB();", function (result) {
             bookFilePath = JSON.parse(result);
             if (bookFilePath === false) {
                 showElementError(document.getElementById("input-active-document"), "Failed to prepare active document");
                 hideSpinner();
             } else {
                 bookFileName = bookFilePath.split("/").pop().split("\\").pop();
-                bookUploadOptions = {"ignore_pagebreaks": true};
+                bookUploadFileType = "epub";
                 createBook();
             }
         });
@@ -773,6 +776,7 @@ function askSaveBookflowFile(bookflow, format, style) {
         bookAutoClean = document.getElementById("input-book-autoclean").checked;
         bookHighlightIssues = document.getElementById("input-book-highlight-issues").checked;
         bookSkipStructure = document.getElementById("input-book-skip-structure").checked;
+        bookUploadFileType = undefined;
         bookUploadOptions = undefined;
 
         // Hide error messages and clear out highlighted fields, if there are any.
