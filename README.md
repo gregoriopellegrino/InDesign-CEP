@@ -10,7 +10,7 @@ You can also download and install this extension directly from the [Adobe Exchan
 
 ## Requirements
 
-The extension requires and supports Adobe InDesign versions 13–17, which relates to CC 2018-22. However, while the extension may run on older versions that hasn’t been tested in depth.
+The extension requires Adobe InDesign version 20 (InDesign 2025) or newer.
 
 ## Coding
 
@@ -67,7 +67,7 @@ Once installed, open the extension panel:
 
 <img src="https://bookalope.net/img/idsn-bookalope-1.4.0-upload.png" width="50%" alt="Bookalope InDesign: Upload panel">
 
-To use the Bookalope web services, you need a Bookalope API key: you can find the key in the [user profile](https://bookflow.bookalope.net/profile) of your Bookalope account. Then select a book manuscript in Word format (or any other of the [supported document formats](https://github.com/jenstroeger/Bookalope/blob/master/API.md#get-formats)), fill in `Name` and `Author` of the book, and then click the `Upload and convert` button.
+To use the Bookalope web services, you need a Bookalope API key: you can find the key in the [user profile](https://bookflow.bookalope.net/profile) of your Bookalope account. Then select a book manuscript in Word format (or any other of the [supported document formats](https://github.com/jenstroeger/Bookalope/blob/master/API.md#get-formats)), fill in `Name` and `Author` of the book, and then click the `Upload and convert` button. Alternatively, you can upload the currently active InDesign document: the extension exports it as an EPUB 3 file (with a page list that matches the printed pages) and uploads that.
 
 The extension uploads the document to the Bookalope server for analysis and conversion. This can take a little while. Once finished, the extension downloads the converted file, creates a new InDesign document, and places the downloaded content into the new InDesign document. The extension’s panel changes now to this:
 

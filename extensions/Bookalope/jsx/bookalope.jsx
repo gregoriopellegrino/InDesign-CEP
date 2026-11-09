@@ -273,407 +273,6 @@ function bookalopeCreateUniqueName(base, ext) {
 
 
 /**
- * Create an RTF file from the document with the given name, and save that to the given path.
- *
- * @param {string} docName - Name of the document for which the RTF is created.
- * @returns {string,bool} False if an error occurred, otherwise the complete path to the RTF file.
- */
-
-function bookalopeDocumentByNameToRTF(docName) {
-
-    var doc = app.documents.itemByName(docName);
-    try {
-        return bookalopeDocumentToRTF(doc);
-    } catch (exc) {
-        alert("Failed to export document: " + exc);
-        return JSON.stringify(false);
-    }
-}
-
-
-/**
- * Create an RTF file from the currently active document, and save that to the given path.
- *
- * @returns {string,bool} False if an error occurred, otherwise the complete path to the RTF file.
- */
-
-function bookalopeActiveDocumentToRTF() {
-
-    var doc = app.documents.length !== 0 ? app.activeDocument : undefined;
-    try {
-        return bookalopeDocumentToRTF(doc);
-    } catch (exc) {
-        alert("Failed to export document: " + exc);
-        return JSON.stringify(false);
-    }
-}
-
-
-/**
- * Create an RTF file from the given document, and save that to the given path.
- *
- * @param {Document} doc - The InDesign document for which the RTF is created.
- * @returns {string,bool} False if an error occurred, otherwise the complete path to the RTF file.
- */
-
-function bookalopeDocumentToRTF(doc) {
-
-    // Check that the document is valid, saved, and that its links are fine.
-    if (!bookalopeCheckDocument(doc)) {
-        return JSON.stringify(false);
-    }
-
-    // A polyfill of Array.prototype.includes, although this may not be
-    // necessary at some point for new versions of InDesign anymore.
-    if (!Array.prototype.includes) {
-        Array.prototype.includes = function(item) {
-            for (var i = 0; i < this.length; i++) {
-                if (this[i] === item) {
-                    return true;
-                }
-            }
-            return false;
-        };
-    }
-
-    var createUniqueName = bookalopeCreateUniqueName;
-
-    /**
-     * Given a text frame and an image, duplicate image near to the text
-     * frame for export.
-     *
-     * @param {TextFram} textFrame - Target text frame where to anchor the image.
-     * @param {Rectangle} imageRect - The image that's duplicated and anchored.
-     * @return {Rectangle} The anchored new image.
-     */
-    function anchorImage(textFrame, imageRect) {
-
-        // Create an anchor in the given text frame for the image.
-        var insertionPoint = textFrame.insertionPoints[0];
-        var anchor = insertionPoint.rectangles.add();
-        anchor.contentType = ContentType.graphicType;
-
-        // Recompose the parent story so that the geometricBounds make sense.
-        insertionPoint.parentStory.recompose();
-
-        // Save the user's measurement preferences, and then switch to points unit.
-        var userHoriz = tmpDoc.viewPreferences.horizontalMeasurementUnits;
-        var userVert = tmpDoc.viewPreferences.verticalMeasurementUnits;
-        tmpDoc.viewPreferences.horizontalMeasurementUnits = MeasurementUnits.points;
-        tmpDoc.viewPreferences.verticalMeasurementUnits = MeasurementUnits.points;
-
-        // Configure the custom anchor.
-        var anchorProps = tmpDoc.anchoredObjectDefaults.properties;
-        anchor.applyObjectStyle(anchorProps.anchoredObjectStyle);
-        if (anchorProps.anchorContent == ContentType.textType) {
-            try {
-                anchor.parentStory.appliedParagraphStyle = anchorProps.anchoredParagraphStyle;
-            } catch (_) {
-                // Might be null, and we do nothing in that case.
-            }
-        }
-        anchor.anchoredObjectSettings.properties = doc.anchoredObjectSettings.properties;
-        anchor.anchoredObjectSettings.anchoredPosition = AnchorPosition.anchored;
-        anchor.anchoredObjectSettings.pinPosition = false;
-
-        // Get the geometric boundaries for both objects.
-        var frameBounds = textFrame.geometricBounds;
-        var imageBounds = imageRect.geometricBounds;
-
-        // Copy image into the anchored frame and resize its bounds.
-        var image = imageRect.images[0];
-        var imagePath = image.itemLink.filePath;
-        anchor.place(new File(imagePath));
-        anchor.geometricBounds = [
-            imageBounds[0] - frameBounds[0],
-            imageBounds[1] - frameBounds[1],
-            imageBounds[2] - frameBounds[0],
-            imageBounds[3] - frameBounds[1]
-        ];
-
-        // Then resize the image itself.
-        var newImageBoundY = anchor.geometricBounds[0] - (imageBounds[0] - imageBounds[0]);
-        var newImageBoundX = anchor.geometricBounds[1] - (imageBounds[1] - imageBounds[1]);
-        anchor.images[0].geometricBounds = [
-            newImageBoundY,
-            newImageBoundX,
-            newImageBoundY + (image.geometricBounds[2] - image.geometricBounds[0]),
-            newImageBoundX + (image.geometricBounds[3] - image.geometricBounds[1])
-        ];
-
-        // Adjust the textWrapPreferences for the anchored image.
-        anchor.textWrapPreferences.textWrapMode = imageRect.textWrapPreferences.textWrapMode;
-        anchor.textWrapPreferences.textWrapOffset = imageRect.textWrapPreferences.textWrapOffset;
-    }
-
-    /**
-     * Write the given Image object to disk using the given path and file name.
-     *
-     * @param {Graphic} graphic - The Graphic object to export.
-     * @param {File} file - The File object represents a local host file.
-     */
-    function exportPNG(graphic, file) {
-        try {
-            var other = graphic.duplicate();
-            try {
-                // FIXME Where's images documented?
-                // https://www.indesignjs.de/extendscriptAPI/indesign-latest/#Graphic.html
-                other.images[0].clearTransformations();
-                other.images[0].fit(FitOptions.FRAME_TO_CONTENT);
-            } catch (_) {
-                // Ignore any problem and try to export the image anyway.
-            }
-            other.exportFile(ExportFormat.PNG_FORMAT, file);
-            other.remove();
-        } catch (_) {
-            // Notify caller/user that exporting the image failed:
-            // https://github.com/bookalope/InDesign-CEP/pull/13#issuecomment-938668459
-        }
-    }
-
-    /**
-     * Compare the locations of two text frames based on their respective geometric
-     * boundaries (which have the format [y1, x1, y2, x2]). Returns -1 if frameA
-     * is above or left of frameB (i.e. is "smaller"); returns 1 otherwise.
-     *
-     * @param {TextFrame} frameA - A TextFrame object reference.
-     * @param {TextFrame} frameB - A TextFrame object reference.
-     * @return {Number} -1 if frameA is smaller than frameB, 1 otherwise.
-     */
-    function cmpFrames(frameA, frameB) {
-        if (frameA.geometricBounds[0] < frameB.geometricBounds[0]) {
-            return -1;
-        }
-        if (frameA.geometricBounds[0] == frameB.geometricBounds[0]) {
-            return (frameA.geometricBounds[1] < frameB.geometricBounds[1]) ? -1 : 1;
-        }
-        return 1;
-    }
-
-    // Create and open a temporary copy of the document that we want to export.
-    var tmpPath = Folder.temp;
-    var tmpDoc = bookalopeOpenTemporaryCopy(doc);
-    if (!tmpDoc) {
-        return JSON.stringify(false);
-    }
-
-    // Open a progress bar window, where max progress is defined by the 8 steps
-    // (i.e. progress 0 through 7) for this RTF conversion. Then, times 100 because
-    // we'll track progress per step in percent, too. Note that `pbarInc` can become
-    // `Infinity` if the number of processed items (e.g. pages.length) is zero. In
-    // that case it won't matter because `pbarInc` isn't used.
-    var progressWin = new Window("palette", "Preparing document for Bookalope...");
-    progressWin.pbar = progressWin.add("progressbar", undefined, 0, 7 * 100);
-    progressWin.pbar.preferredSize.width = 300;
-    progressWin.pbar.value = 0;
-    progressWin.show();
-    var pbarVal, pbarInc;  // To update the progress bar during each step.
-
-    // Step 1: unlock all layers and elements in the document.
-    tmpDoc.layers.everyItem().locked = false;
-    tmpDoc.pageItems.everyItem().locked = false;
-    progressWin.pbar.value = pbarVal = 100;
-
-    // Step 2: add a character style for page numbers that we'll inject
-    // into the text further down. Bookalope will know what to do with
-    // that extra goodness.
-    var pgnrCharacterStyleName = "bookalope-page-number";
-    var pgnrCharacterStyle = tmpDoc.characterStyles.itemByName(pgnrCharacterStyleName);
-    if (!pgnrCharacterStyle.isValid) {
-        pgnrCharacterStyle = tmpDoc.characterStyles.add({
-            name: pgnrCharacterStyleName,
-            pointSize: 0.1
-        });
-    }
-    progressWin.pbar.value = pbarVal = 200;
-
-    // Step 3: insert into the text and where the text flow breaks onto the
-    // next page and using our special character style the page name of the
-    // current page.
-    pbarInc = (1 / tmpDoc.pages.length) * 100;
-    for (var i = 0; i < tmpDoc.pages.length; i++) {
-        var pageTextFrames = [];
-        var page = tmpDoc.pages[i];
-        var textFrames = page.textFrames;
-        for (var j = 0; j < textFrames.length; j++) {
-            var textFrame = textFrames[j];
-            if (textFrame.parent.constructor.name === "Spread") {
-                if (textFrame.contents !== "" && (textFrame.nextTextFrame || textFrame.previousTextFrame)) {
-                    pageTextFrames.push(textFrame);
-                }
-            }
-        }
-        if (pageTextFrames.length !== 0) {
-            pageTextFrames.sort(cmpFrames);
-            var textFrame = pageTextFrames[0];
-            var insertionPoint = textFrame.insertionPoints.item(0);
-            insertionPoint.contents = "" + page.name;
-            insertionPoint.applyCharacterStyle(pgnrCharacterStyle, true);
-        }
-        pbarVal += pbarInc;
-        progressWin.pbar.value = Math.round(pbarVal);
-    }
-    progressWin.pbar.value = pbarVal = 300;
-
-    // Step 4: delete empty graphics, and then export the embedded images.
-    var docGraphics = tmpDoc.allGraphics;
-    var emptyGraphics = [];
-    pbarInc = (1 / docGraphics.length) * 100 * (1/3);
-    for (var i = 0; i < docGraphics.length; i++) {
-        var graphic = docGraphics[i];
-        try {
-            var area = (graphic.visibleBounds[2] - graphic.visibleBounds[0]) * (graphic.visibleBounds[3] - graphic.visibleBounds[1]);
-            if (area === 0) {
-                emptyGraphics.push(graphic);
-            }
-        } catch(_) {
-            emptyGraphics.push(graphic);
-        }
-        pbarVal += pbarInc;
-        progressWin.pbar.value = Math.round(pbarVal);
-    }
-    pbarInc = (1 / emptyGraphics.length) * 100 * (1/3);
-    for (var i = 0; i < emptyGraphics.length; i++) {
-        emptyGraphics[i].remove();
-
-        pbarVal += pbarInc;
-        progressWin.pbar.value = Math.round(pbarVal);
-    }
-    docGraphics = tmpDoc.allGraphics;
-    pbarInc = (1 / docGraphics.length) * 100 * (1/3);
-    for (var i = 0; i < docGraphics.length; i++) {
-        var graphic = docGraphics[i];
-        if (graphic.itemLink == null) {
-            var tmpImgFile = new File(createUniqueName(tmpPath + "/img", ".png"));
-            exportPNG(graphic, tmpImgFile);
-            graphic.parent.place(tmpImgFile);
-        } else if (graphic.itemLink.status === LinkStatus.linkEmbedded) {
-            app.scriptPreferences.userInteractionLevel = UserInteractionLevels.NEVER_INTERACT;
-            graphic.itemLink.unembed(tmpPath);
-            app.scriptPreferences.userInteractionLevel = UserInteractionLevels.INTERACT_WITH_ALL;
-        } else {
-            // Ignore other link statuses:
-            // https://github.com/bookalope/InDesign-CEP/pull/13#issuecomment-938669971
-        }
-        pbarVal += pbarInc;
-        progressWin.pbar.value = Math.round(pbarVal);
-    }
-    progressWin.pbar.value = pbarVal = 400;
-
-    // Step 5: anchor images on document pages.
-    pbarInc = (1 / tmpDoc.pages.length) * 100;
-    for (var i = 0; i < tmpDoc.pages.length; i++) {
-        var page = tmpDoc.pages.item(i);
-        if (page.textFrames.length >= 1) {
-            // Each image must be anchored in order to be exported correctly to RTF,
-            // so we anchor them to the first text box on the page. We can tell the
-            // user that if they have unexpected results (images anchored in incorrect
-            // places) they can anchor images manually before running the script.
-            var textFrame = page.textFrames.item(0);
-            if (page.rectangles.length >= 1) {
-                for (var j = 0; j < page.rectangles.length; j++) {
-                    var imageRect = page.rectangles[j];
-                    if (imageRect.images.length >= 1) {
-                        anchorImage(textFrame, imageRect);
-                    }
-                }
-            }
-        }
-        pbarVal += pbarInc;
-        progressWin.pbar.value = Math.round(pbarVal);
-    }
-    progressWin.pbar.value = pbarVal = 500;
-
-    // Step 6: order stories so we can export them in sequence. So we loop over all pages,
-    // and over all frames on a single page, and order the frames.
-    var stories = [];
-    var storiesId = [];
-    pbarInc = (1 / tmpDoc.pages.length) * 100;
-    for (var i = 0; i < tmpDoc.pages.length; i++) {
-        var page = tmpDoc.pages.item(i);
-        var frames = [];
-        for (var j = 0; j < page.textFrames.length; j++) {
-            frames.push(page.textFrames.item(j));
-        }
-        frames.sort(cmpFrames);
-
-        // For each frame, if its story is not already in the ordered list, we add it.
-        for (var j = 0; j < frames.length; j++) {
-            var frame = frames[j];
-            var story = frame.parentStory;
-            var storyId = story.id;
-            if (!storiesId.includes(storyId)) {
-                stories.push(story);
-                storiesId.push(storyId);
-            }
-        }
-        pbarVal += pbarInc;
-        progressWin.pbar.value = Math.round(pbarVal);
-    }
-    progressWin.pbar.value = pbarVal = 600;
-
-    // Step 7: create a new story where we copy-paste all contents in the correct order.
-    var newContent = tmpDoc.textFrames.add();
-    pbarInc = (1 / stories.length) * 100;
-    for (var i = 0; i < stories.length; i++) {
-        var story = stories[i];
-        story.duplicate(LocationOptions.AT_END, newContent.parentStory);
-        newContent.parentStory.insertionPoints[-1].contents = SpecialCharacters.FRAME_BREAK;
-
-        pbarVal += pbarInc;
-        progressWin.pbar.value = Math.round(pbarVal);
-    }
-    var rtfFile = new File(createUniqueName(tmpPath + "/bookalope-document", ".rtf"));
-    newContent.parentStory.exportFile(ExportFormat.RTF, rtfFile);
-    progressWin.pbar.value = pbarVal = 700;
-
-    // Step 8: close the active & temporary document and the progress window, and return.
-    tmpDoc.close(SaveOptions.NO);
-    progressWin.hide();  // Dispose of the window?
-    return JSON.stringify(rtfFile.fsName);
-}
-
-
-/**
- * A small log of the last EPUB export, written to Folder.temp/bookalope-export.log.
- * It's never shown to the user, but helps understanding what the export did.
- */
-
-var bookalopeLogFile = new File(Folder.temp + "/bookalope-export.log");
-
-
-/**
- * Start a new, empty export log.
- */
-
-function bookalopeLogStart() {
-    bookalopeLogFile.encoding = "UTF-8";
-    bookalopeLogFile.lineFeed = "Unix";
-    if (bookalopeLogFile.open("w")) {
-        bookalopeLogFile.writeln("Bookalope export log, " + new Date().toString());
-        bookalopeLogFile.close();
-    }
-}
-
-
-/**
- * Append the given message to the export log, and to the ExtendScript console.
- *
- * @param {string} message - The message to log.
- */
-
-function bookalopeLog(message) {
-    $.writeln("Bookalope: " + message);
-    bookalopeLogFile.encoding = "UTF-8";
-    bookalopeLogFile.lineFeed = "Unix";
-    if (bookalopeLogFile.open("a")) {
-        bookalopeLogFile.writeln(message);
-        bookalopeLogFile.close();
-    }
-}
-
-
-/**
  * Return a "signature" of the text layout of the given spread: the text of all text
  * frames on that spread, without anchored object markers. If the signature of a spread
  * doesn't change, then no text moved onto or off the spread.
@@ -726,7 +325,7 @@ function bookalopeDocumentTextSignature(doc) {
  * If anchoring an image moves any text on its spread, or the image can't be moved
  * back to its original position, then the image is released again and left where
  * it was: the page list is more important than the image's position in the text.
- * This happens silently, the reasons are only written to the export log.
+ * This happens silently.
  *
  * Releasing an image doesn't always restore the text exactly. If that happens, we
  * stop and return the image's id as `broken`: the document's layout can't be trusted
@@ -775,30 +374,15 @@ function bookalopeAnchorImages(doc, skipIds) {
     }
 
     /**
-     * Describe where two text signatures differ, for the log.
-     */
-    function describeDifference(before, after) {
-        var i = 0;
-        while (i < before.length && i < after.length && before.charAt(i) === after.charAt(i)) {
-            i++;
-        }
-        function excerpt(text) {
-            return text.substr(Math.max(0, i - 30), 60).replace(/\u0000/g, " | ").replace(/[\r\n]/g, " / ");
-        }
-        return "text differs at character " + i + ", before: \"" + excerpt(before) + "\", after: \"" + excerpt(after) + "\"";
-    }
-
-    /**
      * Anchor the given image frame at the given insertion point, then move it back to
      * its original bounds. If the image or any text on its spread moved, release the
-     * image again and return the reason; return undefined on success.
+     * image again. Return "anchored" on success, "failed" if the image was released
+     * and everything is back as it was, or "broken" if restoring didn't work.
      */
     function tryAnchor(rect, bounds, frame, insertionPoint) {
-        restoreFailed = false;
         var spread = rect.parent;
         var signature = bookalopeSpreadTextSignature(spread);
         var anchored = false;
-        var reason;
         try {
             rect.anchoredObjectSettings.insertAnchoredObject(insertionPoint, AnchorPosition.ANCHORED);
             anchored = true;
@@ -806,19 +390,11 @@ function bookalopeAnchorImages(doc, skipIds) {
             frame.parentStory.recompose();
             rect.move([bounds[1], bounds[0]]);
             frame.parentStory.recompose();
-            if (!sameBounds(rect.geometricBounds, bounds)) {
-                reason = "image could not be moved back to its position";
-            } else {
-                var newSignature = bookalopeSpreadTextSignature(spread);
-                if (newSignature !== signature) {
-                    reason = "anchoring moved text (" + describeDifference(signature, newSignature) + ")";
-                }
+            if (sameBounds(rect.geometricBounds, bounds) && bookalopeSpreadTextSignature(spread) === signature) {
+                return "anchored";
             }
-        } catch (exc) {
-            reason = String(exc);
-        }
-        if (!reason) {
-            return undefined;
+        } catch (_) {
+            // Fall through and restore the image.
         }
 
         // Something went wrong, so release the image and restore its position.
@@ -828,22 +404,15 @@ function bookalopeAnchorImages(doc, skipIds) {
             }
             rect.move([bounds[1], bounds[0]]);
             frame.parentStory.recompose();
-            if (!sameBounds(rect.geometricBounds, bounds)) {
-                reason += "; and the image is not back at its position";
-                restoreFailed = true;
+            if (sameBounds(rect.geometricBounds, bounds) && bookalopeSpreadTextSignature(rect.parent) === signature) {
+                return "failed";
             }
-            if (bookalopeSpreadTextSignature(rect.parent) !== signature) {
-                reason += "; and the text was not restored";
-                restoreFailed = true;
-            }
-        } catch (exc) {
-            reason += "; and restoring the image failed: " + exc;
-            restoreFailed = true;
+        } catch (_) {
+            // Restoring failed, too.
         }
-        return reason;
+        return "broken";
     }
 
-    var restoreFailed = false;
     var anchoredCount = 0;
     var skipped = 0;
     for (var i = 0; i < doc.pages.length; i++) {
@@ -873,7 +442,6 @@ function bookalopeAnchorImages(doc, skipIds) {
             var rect = images[j];
             var bounds = rect.geometricBounds;
             if (skipIds[rect.id]) {
-                bookalopeLog("Page " + page.name + ": image " + rect.id + " skipped");
                 skipped++;
                 continue;
             }
@@ -902,32 +470,20 @@ function bookalopeAnchorImages(doc, skipIds) {
             // the anchor, so if that moves text, try at the start of the text frame
             // and then at the start of the story on this page, where more (or all) of
             // the page's lines follow the anchor and are wrapped like before.
-            var candidates = [
-                ["line above image", line.insertionPoints.item(0)],
-                ["start of text frame", frame.insertionPoints.item(0)],
-                ["start of story on page", storyStart]
-            ];
-            var where = [];
+            var candidates = [line.insertionPoints.item(0), frame.insertionPoints.item(0), storyStart];
             var seen = {};
-            for (var k = 0; k < candidates.length; k++) {
-                var index = candidates[k][1].index;
-                if (!seen[index]) {
-                    seen[index] = true;
-                    where.push(candidates[k]);
-                }
-            }
             var done = false;
-            for (var k = 0; k < where.length && !done; k++) {
-                var reason = tryAnchor(rect, bounds, frame, where[k][1]);
-                if (reason) {
-                    bookalopeLog("Page " + page.name + ": image " + rect.id + " not anchored at " + where[k][0] + ": " + reason);
-                    if (restoreFailed) {
-                        return {anchored: anchoredCount, skipped: skipped + 1, broken: rect.id};
-                    }
-                } else {
-                    bookalopeLog("Page " + page.name + ": image " + rect.id + " anchored at " + where[k][0]);
-                    done = true;
+            for (var k = 0; k < candidates.length && !done; k++) {
+                var index = candidates[k].index;
+                if (seen[index]) {
+                    continue;
                 }
+                seen[index] = true;
+                var outcome = tryAnchor(rect, bounds, frame, candidates[k]);
+                if (outcome === "broken") {
+                    return {anchored: anchoredCount, skipped: skipped + 1, broken: rect.id};
+                }
+                done = outcome === "anchored";
             }
             if (done) {
                 anchoredCount++;
@@ -936,7 +492,6 @@ function bookalopeAnchorImages(doc, skipIds) {
             }
         }
     }
-    bookalopeLog("Images anchored: " + anchoredCount + ", left unanchored: " + skipped);
     return {anchored: anchoredCount, skipped: skipped, broken: null};
 }
 
@@ -976,8 +531,6 @@ function bookalopeDocumentToEPUB(doc) {
     }
 
     // Create and open a temporary copy of the document that we want to export.
-    bookalopeLogStart();
-    bookalopeLog("Document: " + doc.fullName.fsName);
     var tmpDoc = bookalopeOpenTemporaryCopy(doc);
     if (!tmpDoc) {
         return JSON.stringify(false);
@@ -1014,10 +567,8 @@ function bookalopeDocumentToEPUB(doc) {
                 break;
             }
             if (result.broken && attempt < 5) {
-                bookalopeLog("Layout changed, starting over without image " + result.broken);
                 skipIds[result.broken] = true;
             } else {
-                bookalopeLog("Layout changed, starting over without anchoring images");
                 anchorImages = false;
             }
             tmpDoc.close(SaveOptions.NO);
@@ -1065,10 +616,8 @@ function bookalopeDocumentToEPUB(doc) {
     }
 
     if (!epubFile.exists) {
-        bookalopeLog("EPUB export failed");
         alert("Failed to export the document to EPUB");
         return JSON.stringify(false);
     }
-    bookalopeLog("EPUB: " + epubFile.fsName);
     return JSON.stringify(epubFile.fsName);
 }

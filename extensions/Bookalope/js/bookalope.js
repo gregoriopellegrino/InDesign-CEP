@@ -605,8 +605,13 @@ function askSaveBookflowFile(bookflow, format, style) {
     function uploadFile(bookflow) {
         showStatus("Uploading and analyzing document");
 
-        // Read the book file, either the selected one or the created one.
+        // Read the book file, either the selected one or the created one. The EPUB
+        // we exported from the active document is a temporary file, so delete it once
+        // it's been read (or failed to read).
         var result = window.cep.fs.readFile(bookFilePath, window.cep.encoding.Base64);
+        if (bookFileType === "active-document") {
+            window.cep.fs.deleteFile(bookFilePath);
+        }
         if (result.err) {
             showElementError(document.getElementById("input-file"), "Unable to load file (" + result.err + ")");
             hideSpinner();
