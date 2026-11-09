@@ -196,6 +196,83 @@ function bookalopeCreateDocument(idmlFileName, bookId, bookflowId, betaHost) {
 
 
 /**
+ * Check that the given document can be exported to Bookalope: it must be valid, it
+ * must have been saved, and all of its links must be valid. Alerts the user if not.
+ *
+ * @param {Document} doc - The InDesign document to check.
+ * @returns {bool} True if the document can be exported, false otherwise.
+ */
+
+function bookalopeCheckDocument(doc) {
+
+    // Check that we work with a valid document.
+    if (!doc || !doc.isValid) {
+        alert("Unable to export an invalid document to Bookalope");
+        return false;
+    }
+
+    // When we export the document we want to make sure that the original active
+    // document and its resources have also been saved.
+    if (!doc.saved || doc.modified) {
+        alert("Please save this document before exporting it to Bookalope");
+        return false;
+    }
+
+    // Make sure that all links in the document are valid.
+    for (var i = 0; i < doc.links.length; i++) {
+        var link = doc.links.item(i);
+        if (link.status === LinkStatus.LINK_INACCESSIBLE || link.status === LinkStatus.LINK_MISSING || link.status === LinkStatus.LINK_OUT_OF_DATE) {
+            alert("Please check the links in this document: some are not up-to-date or are missing");
+            return false;
+        }
+    }
+    return true;
+}
+
+
+/**
+ * Create a temporary copy of the given document and open it without a window.
+ * It looks like
+ *
+ *     var tmpFile = new File(app.createTemporaryCopy(doc.fullName));
+ *
+ * doesn't work on Windows because `createTemporaryCopy()` doesn't actually create
+ * a temporary copy, so we take the manual approach here. See also this Slack
+ * conversation: https://adobedevs.slack.com/archives/C1FKLQ63F/p1635906342026700
+ *
+ * @param {Document} doc - The saved InDesign document to copy.
+ * @returns {Document|null} The opened temporary document, or null if an error occurred.
+ */
+
+function bookalopeOpenTemporaryCopy(doc) {
+
+    var docFile = doc.fullName;
+    var tmpFileName = Folder.temp + "/" + docFile.name;
+    if (!docFile.copy(tmpFileName)) {
+        alert("Unable to create a temporary copy of the document");
+        return null;
+    }
+    return app.open(new File(tmpFileName), false);
+}
+
+
+/**
+ * Generate a unique filename.
+ *
+ * @param {string} base - The path and base name of the filename.
+ * @param {string} ext - The filename extension, including dot.
+ * @return {string} The unique path and filename.
+ */
+
+function bookalopeCreateUniqueName(base, ext) {
+    for (var i = 0; new File(base + ext).exists; i++) {
+        base = base.replace(/_\d+$/, "") + "_" + String(i);
+    }
+    return base + ext;
+}
+
+
+/**
  * Create an RTF file from the document with the given name, and save that to the given path.
  *
  * @param {string} docName - Name of the document for which the RTF is created.
@@ -241,26 +318,9 @@ function bookalopeActiveDocumentToRTF() {
 
 function bookalopeDocumentToRTF(doc) {
 
-    // Check that we work with a valid document.
-    if (!doc || !doc.isValid) {
-        alert("Unable to export an invalid document to Bookalope");
+    // Check that the document is valid, saved, and that its links are fine.
+    if (!bookalopeCheckDocument(doc)) {
         return JSON.stringify(false);
-    }
-
-    // When we export the RTF we want to make sure that the original active
-    // document and its resources have also been saved.
-    if (!doc.saved || doc.modified) {
-        alert("Please save this document before exporting it to Bookalope");
-        return JSON.stringify(false);
-    }
-
-    // Make sure that all links in the document are valid.
-    for (var i = 0; i < doc.links.length; i++) {
-        var link = doc.links.item(i);
-        if (link.status === LinkStatus.LINK_INACCESSIBLE || link.status === LinkStatus.LINK_MISSING || link.status === LinkStatus.LINK_OUT_OF_DATE) {
-            alert("Please check the links in this document: some are not up-to-date or are missing");
-            return JSON.stringify(false);
-        }
     }
 
     // A polyfill of Array.prototype.includes, although this may not be
@@ -276,19 +336,7 @@ function bookalopeDocumentToRTF(doc) {
         };
     }
 
-    /**
-     * Generate a unique filename.
-     *
-     * @param {string} base - The path and base name of the filename.
-     * @param {string} ext - The filename extension, including dot.
-     * @return {string} The unique path and filename.
-     */
-    function createUniqueName(base, ext) {
-        for (var i = 0; new File(base + ext).exists; i++) {
-            base = base.replace(/_\d+$/, "") + "_" + String(i);
-        }
-        return base + ext;
-    }
+    var createUniqueName = bookalopeCreateUniqueName;
 
     /**
      * Given a text frame and an image, duplicate image near to the text
@@ -402,22 +450,12 @@ function bookalopeDocumentToRTF(doc) {
         return 1;
     }
 
-    // Create a temporary copy of the document that we want to export. It looks like
-    //
-    //     var tmpFile = new File(app.createTemporaryCopy(doc.fullName));
-    //
-    // doesn't work on Windows because `createTemporaryCopy()` doesn't actually create
-    // a temporary copy. so we take the manual approach here. See also this Slack
-    // conversation: https://adobedevs.slack.com/archives/C1FKLQ63F/p1635906342026700
-    var docFile = doc.fullName;
+    // Create and open a temporary copy of the document that we want to export.
     var tmpPath = Folder.temp;
-    var tmpFileName = tmpPath + "/" + docFile.name;
-    if (!docFile.copy(tmpFileName)) {
-        alert("Unable to create a temporary copy of the document");
+    var tmpDoc = bookalopeOpenTemporaryCopy(doc);
+    if (!tmpDoc) {
         return JSON.stringify(false);
     }
-    var tmpFile = new File(tmpFileName);
-    var tmpDoc = app.open(tmpFile, false);
 
     // Open a progress bar window, where max progress is defined by the 8 steps
     // (i.e. progress 0 through 7) for this RTF conversion. Then, times 100 because
@@ -593,4 +631,102 @@ function bookalopeDocumentToRTF(doc) {
     tmpDoc.close(SaveOptions.NO);
     progressWin.hide();  // Dispose of the window?
     return JSON.stringify(rtfFile.fsName);
+}
+
+
+/**
+ * Create an EPUB file from the currently active document, and save that to a temporary path.
+ *
+ * @returns {string,bool} False if an error occurred, otherwise the complete path to the EPUB file.
+ */
+
+function bookalopeActiveDocumentToEPUB() {
+
+    var doc = app.documents.length !== 0 ? app.activeDocument : undefined;
+    try {
+        return bookalopeDocumentToEPUB(doc);
+    } catch (exc) {
+        alert("Failed to export document: " + exc);
+        return JSON.stringify(false);
+    }
+}
+
+
+/**
+ * Create a reflowable EPUB 3 file from the given document, and save that to a temporary
+ * path. The export works on a temporary copy of the document, so the original document
+ * and its EPUB export preferences remain untouched.
+ *
+ * @param {Document} doc - The InDesign document for which the EPUB is created.
+ * @returns {string,bool} False if an error occurred, otherwise the complete path to the EPUB file.
+ */
+
+function bookalopeDocumentToEPUB(doc) {
+
+    // Check that the document is valid, saved, and that its links are fine.
+    if (!bookalopeCheckDocument(doc)) {
+        return JSON.stringify(false);
+    }
+
+    // Create and open a temporary copy of the document that we want to export.
+    var tmpDoc = bookalopeOpenTemporaryCopy(doc);
+    if (!tmpDoc) {
+        return JSON.stringify(false);
+    }
+
+    // Open a progress bar window with three steps: unlock, export, close.
+    var progressWin = new Window("palette", "Preparing document for Bookalope...");
+    progressWin.pbar = progressWin.add("progressbar", undefined, 0, 3);
+    progressWin.pbar.preferredSize.width = 300;
+    progressWin.pbar.value = 0;
+    progressWin.show();
+
+    var userInteractionLevel = app.scriptPreferences.userInteractionLevel;
+    var epubFile = new File(bookalopeCreateUniqueName(Folder.temp + "/bookalope-document", ".epub"));
+    try {
+
+        // Step 1: unlock all layers and elements in the document.
+        tmpDoc.layers.everyItem().locked = false;
+        tmpDoc.pageItems.everyItem().locked = false;
+        progressWin.pbar.value = 1;
+
+        // Step 2: configure and export a reflowable EPUB. The preferences are stored
+        // with the (temporary) document, so we set all of them explicitly instead of
+        // inheriting whatever the user configured for their own EPUB exports.
+        var prefs = tmpDoc.epubExportPreferences;
+        prefs.version = EpubVersion.EPUB3;
+        prefs.exportOrder = ExportOrder.LAYOUT_ORDER;
+        prefs.breakDocument = false;
+        prefs.bulletExportOption = BulletListExportOption.UNORDERED_LIST;
+        prefs.numberedListExportOption = NumberedListExportOption.ORDERED_LIST;
+        prefs.embedFont = true;
+        prefs.epubCover = EpubCover.NONE;
+        prefs.footnotePlacement = EPubFootnotePlacement.FOOTNOTE_INSIDE_POPUP;
+        prefs.generateCascadeStyleSheet = true;
+        prefs.includeClassesInHTML = true;
+        prefs.javascripts = [];
+        prefs.preserveLocalOverride = true;
+        prefs.stripSoftReturn = false;
+        prefs.epubCreatePageNavigation = true;
+        prefs.useExistingImageOnExport = true;
+
+        // Suppress export warnings (e.g. overset text) which would block the script.
+        app.scriptPreferences.userInteractionLevel = UserInteractionLevels.NEVER_INTERACT;
+        tmpDoc.exportFile(ExportFormat.EPUB, epubFile, false);
+        progressWin.pbar.value = 2;
+    } finally {
+
+        // Step 3: restore the user's settings, close the temporary document and the
+        // progress window, even if the export failed.
+        app.scriptPreferences.userInteractionLevel = userInteractionLevel;
+        tmpDoc.close(SaveOptions.NO);
+        progressWin.pbar.value = 3;
+        progressWin.close();
+    }
+
+    if (!epubFile.exists) {
+        alert("Failed to export the document to EPUB");
+        return JSON.stringify(false);
+    }
+    return JSON.stringify(epubFile.fsName);
 }
